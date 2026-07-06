@@ -1,0 +1,511 @@
+{
+	"AWSTemplateFormatVersion": "2010-09-09",
+	"Transform": "AWS::Serverless-2016-10-31",
+	"Description": "Criando EC2, S3, IAM Role e API Gateway com Route 53 (opcional) via CloudFormation",
+	"Parameters": {
+		"DomainName": {
+			"Type": "String",
+			"Default": "api.seudominio.com"
+		},
+		"HostedZoneId": {
+			"Type": "String",
+			"Default": "",
+			"Description": "ID da Hosted Zone no Route 53 (deixe vazio para pular a criacao do dominio customizado)"
+		},
+		"CertificateArn": {
+			"Type": "String",
+			"Default": "",
+			"Description": "ARN do certificado ACM validado (deixe vazio para pular a criacao do dominio customizado)"
+		},
+		"SSHLocation": {
+			"Type": "String",
+			"Default": "0.0.0.0/0",
+			"Description": "CIDR permitido para acesso SSH. Recomendado restringir ao seu IP (ex: 200.150.10.5/32)"
+		}
+	},
+	"Conditions": {
+		"HasCustomDomain": {
+			"Fn::And": [
+				{
+					"Fn::Not": [
+						{
+							"Fn::Equals": [
+								{
+									"Ref": "HostedZoneId"
+								},
+								""
+							]
+						}
+					]
+				},
+				{
+					"Fn::Not": [
+						{
+							"Fn::Equals": [
+								{
+									"Ref": "CertificateArn"
+								},
+								""
+							]
+						}
+					]
+				}
+			]
+		}
+	},
+	"Resources": {
+		"MinhaVPC": {
+			"Type": "AWS::EC2::VPC",
+			"Properties": {
+				"CidrBlock": "10.0.0.0/16",
+				"EnableDnsSupport": "true",
+				"EnableDnsHostnames": "true",
+				"Tags": [
+					{
+						"Key": "MinhaVPC",
+						"Value": "MinhaRedeVPC"
+					}
+				]
+			}
+		},
+		"MinhaSubnet": {
+			"Type": "AWS::EC2::Subnet",
+			"Properties": {
+				"VpcId": {
+					"Ref": "MinhaVPC"
+				},
+				"AvailabilityZone": "us-east-1b",
+				"CidrBlock": "10.0.15.0/24",
+				"MapPublicIpOnLaunch": true,
+				"Tags": [
+					{
+						"Key": "Name",
+						"Value": "MinhaRedeVPC"
+					}
+				]
+			}
+		},
+		"MeuInternetGateway": {
+			"Type": "AWS::EC2::InternetGateway",
+			"Properties": {
+				"Tags": [
+					{
+						"Key": "Name",
+						"Value": "MeuInternetGateway"
+					}
+				]
+			}
+		},
+		"AnexoInternetGateway": {
+			"Type": "AWS::EC2::VPCGatewayAttachment",
+			"Properties": {
+				"VpcId": {
+					"Ref": "MinhaVPC"
+				},
+				"InternetGatewayId": {
+					"Ref": "MeuInternetGateway"
+				}
+			}
+		},
+		"MinhaRouteTable": {
+			"Type": "AWS::EC2::RouteTable",
+			"Properties": {
+				"VpcId": {
+					"Ref": "MinhaVPC"
+				},
+				"Tags": [
+					{
+						"Key": "Name",
+						"Value": "MinhaRouteTable"
+					}
+				]
+			}
+		},
+		"RotaInternet": {
+			"Type": "AWS::EC2::Route",
+			"DependsOn": "AnexoInternetGateway",
+			"Properties": {
+				"RouteTableId": {
+					"Ref": "MinhaRouteTable"
+				},
+				"DestinationCidrBlock": "0.0.0.0/0",
+				"GatewayId": {
+					"Ref": "MeuInternetGateway"
+				}
+			}
+		},
+		"AssociacaoRouteTable": {
+			"Type": "AWS::EC2::SubnetRouteTableAssociation",
+			"Properties": {
+				"SubnetId": {
+					"Ref": "MinhaSubnet"
+				},
+				"RouteTableId": {
+					"Ref": "MinhaRouteTable"
+				}
+			}
+		},
+		"SGMinhaEC1": {
+			"Type": "AWS::EC2::SecurityGroup",
+			"Properties": {
+				"GroupDescription": "Permite SSH, HTTP e HTTPS para a instancia EC2",
+				"VpcId": {
+					"Ref": "MinhaVPC"
+				},
+				"SecurityGroupIngress": [
+					{
+						"IpProtocol": "tcp",
+						"FromPort": 22,
+						"ToPort": 22,
+						"CidrIp": {
+							"Ref": "SSHLocation"
+						},
+						"Description": "Acesso SSH"
+					},
+					{
+						"IpProtocol": "tcp",
+						"FromPort": 80,
+						"ToPort": 80,
+						"CidrIp": "0.0.0.0/0",
+						"Description": "Acesso HTTP"
+					},
+					{
+						"IpProtocol": "tcp",
+						"FromPort": 443,
+						"ToPort": 443,
+						"CidrIp": "0.0.0.0/0",
+						"Description": "Acesso HTTPS"
+					}
+				],
+				"Tags": [
+					{
+						"Key": "Name",
+						"Value": "SGMinhaEC1"
+					}
+				]
+			}
+		},
+		"PapelDeAcessoEC2S3": {
+			"Type": "AWS::IAM::Role",
+			"Properties": {
+				"AssumeRolePolicyDocument": {
+					"Statement": [
+						{
+							"Effect": "Allow",
+							"Principal": {
+								"Service": [
+									"ec2.amazonaws.com"
+								]
+							},
+							"Action": [
+								"sts:AssumeRole"
+							]
+						}
+					]
+				},
+				"Policies": [
+					{
+						"PolicyName": "PermissaoAcessoS3",
+						"PolicyDocument": {
+							"Statement": [
+								{
+									"Sid": "ConcedendoAcessoAoBucket",
+									"Effect": "Allow",
+									"Action": [
+										"s3:GetObject",
+										"s3:PutObject",
+										"s3:ListBucket"
+									],
+									"Resource": [
+										{
+											"Fn::GetAtt": [
+												"MeuBucketS3",
+												"Arn"
+											]
+										},
+										{
+											"Fn::Sub": "${MeuBucketS3.Arn}/*"
+										}
+									]
+								}
+							]
+						}
+					}
+				]
+			}
+		},
+		"PerfilDeAcessoEC2": {
+			"Type": "AWS::IAM::InstanceProfile",
+			"Properties": {
+				"Roles": [
+					{
+						"Ref": "PapelDeAcessoEC2S3"
+					}
+				]
+			}
+		},
+		"MeuBucketS3": {
+			"Type": "AWS::S3::Bucket",
+			"Properties": {
+				"BucketName": {
+					"Fn::Sub": "mb-${AWS::AccountId}-${AWS::Region}"
+				},
+				"Tags": [
+					{
+						"Key": "Name",
+						"Value": "MeuBucketS3"
+					}
+				]
+			}
+		},
+		"MinhaEC1": {
+			"Type": "AWS::EC2::Instance",
+			"Properties": {
+				"AvailabilityZone": "us-east-1b",
+				"ImageId": "ami-091138d0f0d41ff90",
+				"InstanceType": "t2.micro",
+				"IamInstanceProfile": {
+					"Ref": "PerfilDeAcessoEC2"
+				},
+				"SubnetId": {
+					"Ref": "MinhaSubnet"
+				},
+				"SecurityGroupIds": [
+					{
+						"Ref": "SGMinhaEC1"
+					}
+				],
+				"Tags": [
+					{
+						"Key": "Name",
+						"Value": "MinhaEC1"
+					}
+				]
+			}
+		},
+		"MyApi": {
+			"Type": "AWS::ApiGateway::RestApi",
+			"Properties": {
+				"Name": "MyApi"
+			}
+		},
+		"MyApiDeployment": {
+			"Type": "AWS::ApiGateway::Deployment",
+			"DependsOn": "MyApiMethod",
+			"Properties": {
+				"RestApiId": {
+					"Ref": "MyApi"
+				}
+			}
+		},
+		"MyApiStage": {
+			"Type": "AWS::ApiGateway::Stage",
+			"Properties": {
+				"StageName": "prod",
+				"RestApiId": {
+					"Ref": "MyApi"
+				},
+				"DeploymentId": {
+					"Ref": "MyApiDeployment"
+				}
+			}
+		},
+		"MyApiResource": {
+			"Type": "AWS::ApiGateway::Resource",
+			"Properties": {
+				"RestApiId": {
+					"Ref": "MyApi"
+				},
+				"ParentId": {
+					"Fn::GetAtt": [
+						"MyApi",
+						"RootResourceId"
+					]
+				},
+				"PathPart": "hello"
+			}
+		},
+		"MyApiMethod": {
+			"Type": "AWS::ApiGateway::Method",
+			"Properties": {
+				"RestApiId": {
+					"Ref": "MyApi"
+				},
+				"ResourceId": {
+					"Ref": "MyApiResource"
+				},
+				"HttpMethod": "GET",
+				"AuthorizationType": "NONE",
+				"Integration": {
+					"Type": "MOCK",
+					"RequestTemplates": {
+						"application/json": "{\"statusCode\": 200}"
+					},
+					"IntegrationResponses": [
+						{
+							"StatusCode": "200"
+						}
+					]
+				},
+				"MethodResponses": [
+					{
+						"StatusCode": "200"
+					}
+				]
+			}
+		},
+		"ApiDomainName": {
+			"Type": "AWS::ApiGateway::DomainName",
+			"Condition": "HasCustomDomain",
+			"Properties": {
+				"DomainName": {
+					"Ref": "DomainName"
+				},
+				"RegionalCertificateArn": {
+					"Ref": "CertificateArn"
+				},
+				"EndpointConfiguration": {
+					"Types": [
+						"REGIONAL"
+					]
+				}
+			}
+		},
+		"ApiBasePathMapping": {
+			"Type": "AWS::ApiGateway::BasePathMapping",
+			"Condition": "HasCustomDomain",
+			"Properties": {
+				"DomainName": {
+					"Ref": "ApiDomainName"
+				},
+				"RestApiId": {
+					"Ref": "MyApi"
+				},
+				"Stage": {
+					"Ref": "MyApiStage"
+				}
+			}
+		},
+		"ApiDnsRecord": {
+			"Type": "AWS::Route53::RecordSet",
+			"Condition": "HasCustomDomain",
+			"Properties": {
+				"HostedZoneId": {
+					"Ref": "HostedZoneId"
+				},
+				"Name": {
+					"Ref": "DomainName"
+				},
+				"Type": "A",
+				"AliasTarget": {
+					"DNSName": {
+						"Fn::GetAtt": [
+							"ApiDomainName",
+							"RegionalDomainName"
+						]
+					},
+					"HostedZoneId": {
+						"Fn::GetAtt": [
+							"ApiDomainName",
+							"RegionalHostedZoneId"
+						]
+					},
+					"EvaluateTargetHealth": false
+				}
+			}
+		},
+		"Function": {
+			"Type": "AWS::Serverless::Function",
+			"Properties": {
+				"Description": {
+					"Fn::Sub": [
+						"Stack ${AWS::StackName} Function ${ResourceName}",
+						{
+							"ResourceName": "Function"
+						}
+					]
+				},
+				"CodeUri": "src/Function",
+				"Handler": "index.handler",
+				"Runtime": "nodejs20.x",
+				"MemorySize": 3008,
+				"Timeout": 30,
+				"Tracing": "Active",
+				"Events": {
+					"MeuBucketS3": {
+						"Type": "S3",
+						"Properties": {
+							"Bucket": {
+								"Ref": "MeuBucketS3"
+							},
+							"Events": [
+								"s3:ObjectCreated:*",
+								"s3:ObjectRemoved:*"
+							]
+						}
+					},
+					"Topic": {
+						"Type": "SNS",
+						"Properties": {
+							"Topic": {
+								"Ref": "Topic"
+							},
+							"Region": {
+								"Fn::Select": [
+									3,
+									{
+										"Fn::Split": [
+											":",
+											{
+												"Ref": "Topic"
+											}
+										]
+									}
+								]
+							}
+						}
+					}
+				}
+			}
+		},
+		"FunctionLogGroup": {
+			"Type": "AWS::Logs::LogGroup",
+			"DeletionPolicy": "Retain",
+			"Properties": {
+				"LogGroupName": {
+					"Fn::Sub": "/aws/lambda/${Function}"
+				}
+			}
+		},
+		"Topic": {
+			"Type": "AWS::SNS::Topic"
+		}
+	},
+	"Outputs": {
+		"ApiUrl": {
+			"Condition": "HasCustomDomain",
+			"Value": {
+				"Fn::Sub": "https://${DomainName}/hello"
+			}
+		},
+		"ApiUrlDefault": {
+			"Value": {
+				"Fn::Sub": "https://${MyApi}.execute-api.${AWS::Region}.amazonaws.com/prod/hello"
+			},
+			"Description": "URL padrao da API (sempre disponivel, mesmo sem dominio customizado)"
+		},
+		"EC2PublicDNS": {
+			"Value": {
+				"Fn::GetAtt": [
+					"MinhaEC1",
+					"PublicDnsName"
+				]
+			}
+		},
+		"BucketName": {
+			"Value": {
+				"Ref": "MeuBucketS3"
+			}
+		}
+	}
+}
